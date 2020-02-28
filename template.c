@@ -1,12 +1,13 @@
 /**
- * prenom1 nom1 mat1
- * prenom2 nom2 mat2
+ * Guillaume Noël-Martel 20056635
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
 #include <pthread.h>
+#include <string.h>
+#include <errno.h>
 
 typedef unsigned char bool;
 typedef struct command_struct command;
@@ -48,6 +49,11 @@ typedef int error_code;
 #define HAS_ERROR(err) ((err) < 0)
 #define HAS_NO_ERROR(err) ((err) >= 0)
 #define NO_ERROR 0
+#define ERROR_ARG_IS_NULL -1
+#define ERROR_CONF_IS_NULL -2
+#define ERROR_SYNTAX -3
+#define ERROR_OOM -4
+#define ERROR_DEV_IS_LAZY -5
 #define CAST(type, src)((type)(src))
 
 typedef struct {
@@ -69,6 +75,43 @@ typedef struct {
 // Configuration globale
 configuration *conf = NULL;
 
+// Parsing
+
+char *advance_to_token(char *line, char token) {
+    for (; *line != token; line++)
+        if (*line == '\0')
+            return NULL;
+    return line;
+}
+
+error_code parse_cmd_name(char *line, char **end) {
+    *end = line;
+    for (char next = **end;
+        // TODO c'pas bon.
+        next != '\0' && next != ' ' && next != '\n' && next != '&' && next != ',';
+        *end++, next = **end);
+    return NO_ERROR;
+}
+
+error_code parse_num(char *line, char **end) {
+    *end = line;
+    for (char next = **end;
+        next != '\0' && next >= 0 && next <= 9;
+        *end++, next = **end);
+    return NO_ERROR;
+}
+
+char *copy_str(char *line, char *end) {
+    char *str;
+    int n = end - line;
+    if ((str = (char*)malloc(sizeof(char) * (n + 1))) == NULL)
+        NULL;
+    for (int i = 0; i < n; i++)
+        str[i] = line[i];
+    str[n] = '\0';
+    return str;
+}
+
 /**
  * Cette fonction analyse la première ligne et remplie la configuration
  * @param line la première ligne du shell
@@ -76,6 +119,83 @@ configuration *conf = NULL;
  * @return un code d'erreur (ou rien si correct)
  */
 error_code parse_first_line(char *line) {
+    if (conf != NULL)
+        return ERROR_DEV_IS_LAZY;
+    // Le format est
+    // (cmd_name[,]){n}&(cmd_cap[,]){n}&(fs_cap)&(net_cap)&(sys_cap)&(other_cap)
+    // ex:
+    // echo,sed&5,27&27&12&11&14&2
+
+    // On commence par comptabiliser la mémoire qu'on aura besoin.
+    // Vérifier si on a des commandes spécifiées.
+    // TODO ne pas dépendre d'un calcul sur le nombre de parties.
+    int parts = 1;
+    for (char *look_ahead = line;
+        advance_to_token(look_ahead, '&');
+        parts++);
+    if (parts != 6 && parts != 4)
+        return ERROR_SYNTAX;
+
+    // Déterminer le nombre de commandes et vérifier qu'elles sont biens
+    // comptabilisées dans les caps.
+    char *end = line;
+
+    int cmds = 0;
+    if (parts == 6) {
+        for (cmds++;
+            HAS_NO_ERROR(parse_cmd_name(end, &end)) && *end == ',';
+            cmds++, end++);
+
+        if (*end != '&')
+            return ERROR_SYNTAX;
+
+        int cmds_check = 1;
+        for (;
+            HAS_NO_ERROR(parse_num(end, &end)) && *end == ',';
+            cmds_check++, end++);
+
+        if (*end != '&' || cmds != cmds_check)
+            return ERROR_SYNTAX;
+    }
+
+    // Création de la configuration.
+    if ((conf = (configuration*)malloc(sizeof(configuration))) == NULL)
+        return ERROR_OOM;
+
+    // Création des commandes
+    end = line;
+    conf->command_count = cmds;
+    if ((conf->commands = (char**)malloc(sizeof(char*) * cmds)) == NULL ||
+        (conf->command_caps = (int*)malloc(sizeof(int) * cmds)) == NULL)
+        return ERROR_OOM;
+    for (int i = 0; i < cmds; i++)
+        conf->commands[i] = NULL;
+
+    for (int i = 0; i < cmds; i++, end++) {
+        char *start = end;
+        parse_cmd_name(start, &end);
+        conf->commands[i] = copy_str(start, end);
+    }
+
+    // Calcul des caps
+    for (int i = 0; i < cmds; i++, end++) {
+        conf->command_caps[i] = strtol(end, &end, 10);
+        if (errno == ERANGE || errno == EINVAL)
+            return ERROR_SYNTAX;
+    }
+
+    for (int i = 0; i < 4; i++, end++) {
+        long num = strtol(end, &end, 10);
+        if (errno == ERANGE || errno == EINVAL)
+            return ERROR_SYNTAX;
+        switch (i) {
+            case 0: conf->file_system_cap = num; break;
+            case 1: conf->network_cap = num; break;
+            case 2: conf->system_cap = num; break;
+            case 3: conf->any_cap = num; break;
+        }
+    }
+
     return NO_ERROR;
 }
 
@@ -85,6 +205,7 @@ error_code parse_first_line(char *line) {
 #define NET_CMD_TYPE 1
 #define SYS_CMD_COUNTS 3
 #define SYS_CMD_TYPE 2
+#define OTHER_CMD_TYPE_START 3
 
 const char *FILE_SYSTEM_CMDS[FS_CMDS_COUNT] = {
         "ls",
@@ -122,7 +243,29 @@ const char *SYSTEM_CMDS[SYS_CMD_COUNTS] = {
  * @return le numéro de la catégorie (ou une erreur)
  */
 error_code resource_no(char *res_name) {
-    return NO_ERROR;
+    if (res_name == NULL)
+        return ERROR_ARG_IS_NULL;
+    if (conf == NULL)
+        return ERROR_CONF_IS_NULL;
+
+    for (int i = FS_CMDS_COUNT; i--;)
+        if (!strcmp(FILE_SYSTEM_CMDS[i], res_name))
+            return FS_CMD_TYPE;
+
+    for (int i = NETWORK_CMDS_COUNT; i--;)
+        if (!strcmp(NETWORK_CMDS[i], res_name))
+            return NET_CMD_TYPE;
+
+    for (int i = SYS_CMD_COUNTS; i--;)
+        if (!strcmp(SYSTEM_CMDS[i], res_name))
+            return SYS_CMD_TYPE;
+
+    for (int i = 0; i < conf->command_count; i++)
+        if (!strcmp(conf->commands[i], res_name))
+            return i + OTHER_CMD_TYPE_START;
+
+    // "other"
+    return OTHER_CMD_TYPE_START + conf->command_count;
 }
 
 /**
