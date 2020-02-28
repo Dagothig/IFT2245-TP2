@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 
 typedef unsigned char bool;
 typedef struct command_struct command;
@@ -48,13 +49,15 @@ struct banker_customer_struct {
 typedef int error_code;
 #define HAS_ERROR(err) ((err) < 0)
 #define HAS_NO_ERROR(err) ((err) >= 0)
-#define NO_ERROR 0
-#define ERROR_ARG_IS_NULL -1
-#define ERROR_CONF_IS_NULL -2
-#define ERROR_SYNTAX -3
-#define ERROR_OOM -4
-#define ERROR_DEV_IS_LAZY -5
+#define NO_ERROR (0)
+#define ERROR_ARG_IS_NULL (-1)
+#define ERROR_CONF_IS_NULL (-2)
+#define ERROR_SYNTAX (-3)
+#define ERROR_OOM (-4)
+#define ERROR_DEV_IS_LAZY (-5)
 #define CAST(type, src)((type)(src))
+#define true (1)
+#define false (0)
 
 typedef struct {
     char **commands;
@@ -82,6 +85,43 @@ char *advance_to_token(char *line, char token) {
         if (*line == '\0')
             return NULL;
     return line;
+}
+
+char *advance_to_non_whitespace(char *line) {
+    while (true) switch (*line) {
+        case ' ':
+        case '\n':
+            line++;
+            break;
+        case '\0':
+        default:
+            return line;
+    }
+}
+
+char *advance_to_whitespace(char *line) {
+    while (true) switch (*line) {
+        case ' ':
+        case '\0':
+            return line;
+        default:
+            line++;
+            break;
+    }
+}
+
+char *advance_to_operator(char *line) {
+    while (true) switch (*line) {
+        case '&':
+        case '|':
+        case ')':
+        case '\n':
+        case '\0':
+            return line;
+        default:
+            line++;
+            break;
+    }
 }
 
 error_code parse_cmd_name(char *line, char **end) {
@@ -119,8 +159,8 @@ char *copy_str(char *line, char *end) {
  * @return un code d'erreur (ou rien si correct)
  */
 error_code parse_first_line(char *line) {
-    if (conf != NULL)
-        return ERROR_DEV_IS_LAZY;
+    if (conf == NULL)
+        return ERROR_CONF_IS_NULL;
     // Le format est
     // (cmd_name[,]){n}&(cmd_cap[,]){n}&(fs_cap)&(net_cap)&(sys_cap)&(other_cap)
     // ex:
@@ -158,10 +198,6 @@ error_code parse_first_line(char *line) {
             return ERROR_SYNTAX;
     }
 
-    // Création de la configuration.
-    if ((conf = (configuration*)malloc(sizeof(configuration))) == NULL)
-        return ERROR_OOM;
-
     // Création des commandes
     end = line;
     conf->command_count = cmds;
@@ -185,16 +221,20 @@ error_code parse_first_line(char *line) {
     }
 
     for (int i = 0; i < 4; i++, end++) {
-        long num = strtol(end, &end, 10);
-        if (errno == ERANGE || errno == EINVAL)
+        long parsed_num = strtol(end, &end, 10);
+        if (errno == ERANGE || errno == EINVAL || parsed_num > INT_MAX || parsed_num < 0)
             return ERROR_SYNTAX;
+        int num = (int)parsed_num;
         switch (i) {
             case 0: conf->file_system_cap = num; break;
             case 1: conf->network_cap = num; break;
             case 2: conf->system_cap = num; break;
             case 3: conf->any_cap = num; break;
+            default: return ERROR_DEV_IS_LAZY;
         }
     }
+
+    conf->ressources_count = 4 + conf->command_count;
 
     return NO_ERROR;
 }
@@ -243,10 +283,15 @@ const char *SYSTEM_CMDS[SYS_CMD_COUNTS] = {
  * @return le numéro de la catégorie (ou une erreur)
  */
 error_code resource_no(char *res_name) {
+    // TODO: strcmps scary?
     if (res_name == NULL)
         return ERROR_ARG_IS_NULL;
     if (conf == NULL)
         return ERROR_CONF_IS_NULL;
+
+    for (int i = 0; i < conf->command_count; i++)
+        if (!strcmp(conf->commands[i], res_name))
+            return i + OTHER_CMD_TYPE_START;
 
     for (int i = FS_CMDS_COUNT; i--;)
         if (!strcmp(FILE_SYSTEM_CMDS[i], res_name))
@@ -260,10 +305,6 @@ error_code resource_no(char *res_name) {
         if (!strcmp(SYSTEM_CMDS[i], res_name))
             return SYS_CMD_TYPE;
 
-    for (int i = 0; i < conf->command_count; i++)
-        if (!strcmp(conf->commands[i], res_name))
-            return i + OTHER_CMD_TYPE_START;
-
     // "other"
     return OTHER_CMD_TYPE_START + conf->command_count;
 }
@@ -276,11 +317,135 @@ error_code resource_no(char *res_name) {
  * @return la quantité de la ressource disponible
  */
 int resource_count(int resource_no) {
-    return 0;
+    if (conf == NULL)
+        return ERROR_CONF_IS_NULL;
+    int other_no = OTHER_CMD_TYPE_START + conf->command_count;
+    if (resource_no < 0 || resource_no > other_no)
+        return ERROR_DEV_IS_LAZY;
+
+    switch (resource_no) {
+        case FS_CMD_TYPE:
+            return conf->file_system_cap;
+        case NET_CMD_TYPE:
+            return conf->network_cap;
+        case SYS_CMD_TYPE:
+            return conf->system_cap;
+        default:
+            if (resource_no == other_no)
+                return conf->any_cap;
+            else
+                return conf->command_caps[resource_no - OTHER_CMD_TYPE_START];
+    }
 }
 
 // Forward declaration
 error_code evaluate_whole_chain(command_head *head);
+
+error_code release_command_chain(command_head *head) {
+    if (head == NULL)
+        return NO_ERROR;
+    free(head->max_resources);
+    if (pthread_mutex_destroy(head->mutex))
+        return ERROR_DEV_IS_LAZY;
+
+    while (head->command) {
+        command *cmd = head->command;
+        head->command = cmd->next;
+        free(cmd->ressources);
+        if (cmd->call != NULL)
+            for (int i = 0; i < cmd->call_size; i++)
+                free(cmd->call[i]);
+        free(cmd->call);
+        free(cmd);
+    }
+
+    free(head);
+    return NO_ERROR;
+}
+
+error_code create_call(char **line_ptr, command* cmd, int depth) {
+    // rN et fN sont par préfixe:
+    if (**line_ptr == 'r' || **line_ptr == 'f') {
+        char *num_end = NULL;
+        long parsed_num = strtol(*line_ptr + 1, &num_end, 10);
+        // Si pour quelque raison que ce soit on n'a pas le bon format, on présume
+        // que ce n'est pas rN/fN.
+        if (num_end != NULL &&
+            *num_end == '(' &&
+            parsed_num >= 0 &&
+            parsed_num <= INT_MAX
+        ) {
+            int num = (int)parsed_num;
+            error_code res;
+            cmd->count = **line_ptr == 'f' ? -num : num;
+            *line_ptr = num_end + 1;
+            if (HAS_ERROR(res = create_call(line_ptr, cmd, depth + 1)))
+                return res;
+            cmd->op = BIDON;
+        }
+    }
+
+    char *op = advance_to_operator(*line_ptr);
+    if (op == *line_ptr)
+        return ERROR_SYNTAX;
+
+    // On compte les parties.
+    int parts = 1;
+    for (char *line = *line_ptr; line < op; parts++) {
+        char *part_end = advance_to_whitespace(line);
+        line = advance_to_non_whitespace(part_end);
+    }
+
+    // On crée la structure pour le call.
+    cmd->call_size = parts;
+    if ((cmd->call = (char**)malloc(sizeof(char*) * parts)) == NULL)
+        return ERROR_OOM;
+    for (int part = 0; part < parts; part++)
+        cmd->call[part] = NULL;
+
+    // On remplit la structure.
+    for (int part = 0; part < parts; part++) {
+        char *part_end = advance_to_whitespace(*line_ptr);
+        if ((cmd->call[part] = copy_str(*line_ptr, part_end)) == NULL)
+            return ERROR_OOM;
+        (*line_ptr) = advance_to_non_whitespace(part_end);
+    }
+
+    // On parse l'opérateur
+    switch (*op) {
+        case '&':
+            op++;
+            if (*op != '&') // Background
+                cmd->op = ALSO;
+            else { // AND
+                cmd->op = AND;
+                op++;
+            }
+            break;
+        case '|':
+            op++;
+            if (*op != '|') // La tuyauterie n'est pas supportée.
+                return ERROR_SYNTAX;
+            else { // OR
+                cmd->op = OR;
+                op++;
+            }
+            break;
+        case '\0':
+            cmd->op = NONE;
+            break;
+        case ')':
+            if (!depth)
+                return ERROR_SYNTAX;
+        default:
+            op++;
+            cmd->op = NONE;
+            break;
+    }
+
+    *line_ptr = op;
+    return NO_ERROR;
+}
 
 /**
  * Créer une chaîne de commande qui correspond à une ligne de commandes
@@ -290,7 +455,65 @@ error_code evaluate_whole_chain(command_head *head);
  * @return un code d'erreur
  */
 error_code create_command_chain(const char *line, command_head **result) {
-    return NO_ERROR;
+    // Alloc head
+    command_head *head = NULL;
+    command *previous = NULL;
+    if ((head = (command_head*)malloc(sizeof(command_head))) == NULL)
+        return ERROR_OOM;
+    head->max_resources = NULL;
+    head->max_resources_count = conf->ressources_count; // TODO unsigned?
+    head->command = NULL;
+    head->mutex = NULL;
+    head->background = false; // TODO WATT
+
+    error_code res = NO_ERROR;
+    if ((head->max_resources = (int*)malloc(sizeof(int) * head->max_resources_count)) == NULL ||
+        pthread_mutex_init(head->mutex, NULL)
+    ) {
+        res = ERROR_OOM;
+        goto end;
+    }
+
+    // Alloc chain
+    while (true) {
+        if (*(line = advance_to_non_whitespace(line)) == '\0')
+            break;
+
+        command *cmd = NULL;
+        if ((cmd = (command*)malloc(sizeof(command))) == NULL) {
+           res = ERROR_OOM;
+            goto end;
+        }
+
+        if (previous)
+            previous->next = cmd;
+        else
+            head->command = cmd;
+        previous = cmd;
+
+        cmd->ressources = NULL;
+        cmd->call = NULL;
+        cmd->call_size = 0;
+        cmd->count = 1;
+        cmd->op = NONE;
+        cmd->next = NULL;
+
+        if ((cmd->ressources = (int*)malloc(sizeof(int) * head->max_resources_count)) == NULL) {
+            res = ERROR_OOM;
+            goto end;
+        }
+
+        if (HAS_ERROR(res = create_call(&line, cmd, 0)))
+            goto end;
+    }
+
+    end:
+    if (HAS_ERROR(res)) {
+        release_command_chain(head);
+        head = NULL;
+    }
+    *result = head;
+    return res;
 }
 
 /**
@@ -300,6 +523,15 @@ error_code create_command_chain(const char *line, command_head **result) {
  * @return un code d'erreur
  */
 error_code count_ressources(command_head *head, command *command_block) {
+    if (head == NULL ||
+        command_block == NULL ||
+        command_block->ressources == NULL ||
+        command_block->call_size < 1)
+        return ERROR_ARG_IS_NULL;
+    int no = resource_no(command_block->call[0]);
+    // TODO check res / max res count
+    command_block->ressources[no] = command_block->count;
+    head->max_resources[no] += command_block->count;
     return NO_ERROR;
 }
 
@@ -401,6 +633,25 @@ error_code request_resource(banker_customer *customer, int cmd_depth) {
  */
 error_code init_shell() {
     error_code err = NO_ERROR;
+
+    if ((conf = (configuration*)malloc(sizeof(configuration))) == NULL) {
+        err = ERROR_OOM;
+        goto end;
+    }
+
+    conf->commands = NULL;
+    conf->command_caps = NULL;
+    conf->command_count = 0;
+    conf->ressources_count = 0;
+    conf->file_system_cap = 0;
+    conf->network_cap = 0;
+    conf->system_cap = 0;
+    conf->any_cap = 0;
+    conf->no_banquers = 0;
+
+    end:
+    if (HAS_ERROR(err))
+        free(conf);
     return err;
 }
 
@@ -410,6 +661,12 @@ error_code init_shell() {
  * et de votre programme.
  */
 void close_shell() {
+    if (conf != NULL) {
+        free(conf->commands);
+        free(conf->command_caps);
+        free(conf);
+        conf = NULL;
+    }
 }
 
 /**
