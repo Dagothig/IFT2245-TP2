@@ -9,6 +9,8 @@
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 typedef unsigned char bool;
 typedef struct command_struct command;
@@ -44,17 +46,26 @@ struct banker_customer_struct {
     banker_customer *prev;
     int *current_resources;
     int depth;
+    pthread_mutex_t *mutex;
 };
 
 typedef int error_code;
+
 #define HAS_ERROR(err) ((err) < 0)
+#define IS_FATAL(err) ((err) <= -10)
 #define HAS_NO_ERROR(err) ((err) >= 0)
+
 #define NO_ERROR (0)
+
 #define ERROR_ARG_IS_NULL (-1)
 #define ERROR_CONF_IS_NULL (-2)
 #define ERROR_SYNTAX (-3)
-#define ERROR_OOM (-4)
-#define ERROR_DEV_IS_LAZY (-5)
+#define ERROR_DEV_IS_LAZY (-4)
+
+#define ERROR_OOM (-10)
+#define RESULT_EXIT (-11)
+#define RESULT_INVALID_COMMAND (-12)
+
 #define CAST(type, src)((type)(src))
 #define true (1)
 #define false (0)
@@ -102,6 +113,7 @@ char *advance_to_non_whitespace(char *line) {
 char *advance_to_whitespace(char *line) {
     while (true) switch (*line) {
         case ' ':
+        case '\n':
         case '\0':
             return line;
         default:
@@ -129,24 +141,24 @@ error_code parse_cmd_name(char *line, char **end) {
     for (char next = **end;
         // TODO c'pas bon.
         next != '\0' && next != ' ' && next != '\n' && next != '&' && next != ',';
-        *end++, next = **end);
+        next = *(++(*end)));
     return NO_ERROR;
 }
 
 error_code parse_num(char *line, char **end) {
     *end = line;
     for (char next = **end;
-        next != '\0' && next >= 0 && next <= 9;
-        *end++, next = **end);
+        next >= '0' && next <= '9';
+        next = *(++(*end)));
     return NO_ERROR;
 }
 
 char *copy_str(char *line, char *end) {
     char *str;
-    int n = end - line;
-    if ((str = (char*)malloc(sizeof(char) * (n + 1))) == NULL)
+    long n = end - line;
+    if ((str = malloc(sizeof(char) * (n + 1))) == NULL)
         NULL;
-    for (int i = 0; i < n; i++)
+    for (long i = 0; i < n; i++)
         str[i] = line[i];
     str[n] = '\0';
     return str;
@@ -171,8 +183,8 @@ error_code parse_first_line(char *line) {
     // TODO ne pas dépendre d'un calcul sur le nombre de parties.
     int parts = 1;
     for (char *look_ahead = line;
-        advance_to_token(look_ahead, '&');
-        parts++);
+         (look_ahead = advance_to_token(look_ahead, '&'));
+        parts++, look_ahead++);
     if (parts != 6 && parts != 4)
         return ERROR_SYNTAX;
 
@@ -188,6 +200,7 @@ error_code parse_first_line(char *line) {
 
         if (*end != '&')
             return ERROR_SYNTAX;
+        end++;
 
         int cmds_check = 1;
         for (;
@@ -201,11 +214,13 @@ error_code parse_first_line(char *line) {
     // Création des commandes
     end = line;
     conf->command_count = cmds;
-    if ((conf->commands = (char**)malloc(sizeof(char*) * cmds)) == NULL ||
-        (conf->command_caps = (int*)malloc(sizeof(int) * cmds)) == NULL)
+    if ((conf->commands = malloc(sizeof(char*) * cmds)) == NULL ||
+        (conf->command_caps = malloc(sizeof(int) * cmds)) == NULL)
         return ERROR_OOM;
-    for (int i = 0; i < cmds; i++)
+    for (int i = 0; i < cmds; i++) {
         conf->commands[i] = NULL;
+        conf->command_caps[i] = 0;
+    }
 
     for (int i = 0; i < cmds; i++, end++) {
         char *start = end;
@@ -214,10 +229,12 @@ error_code parse_first_line(char *line) {
     }
 
     // Calcul des caps
+    conf->ressources_count = 4 + conf->command_count;
     for (int i = 0; i < cmds; i++, end++) {
-        conf->command_caps[i] = strtol(end, &end, 10);
-        if (errno == ERANGE || errno == EINVAL)
+        long parsed_num = strtol(end, &end, 10);
+        if (errno == ERANGE || errno == EINVAL || parsed_num > INT_MAX || parsed_num < 0)
             return ERROR_SYNTAX;
+        conf->command_caps[i] = (int)parsed_num;
     }
 
     for (int i = 0; i < 4; i++, end++) {
@@ -233,8 +250,6 @@ error_code parse_first_line(char *line) {
             default: return ERROR_DEV_IS_LAZY;
         }
     }
-
-    conf->ressources_count = 4 + conf->command_count;
 
     return NO_ERROR;
 }
@@ -319,6 +334,7 @@ error_code resource_no(char *res_name) {
 int resource_count(int resource_no) {
     if (conf == NULL)
         return ERROR_CONF_IS_NULL;
+
     int other_no = OTHER_CMD_TYPE_START + conf->command_count;
     if (resource_no < 0 || resource_no > other_no)
         return ERROR_DEV_IS_LAZY;
@@ -344,9 +360,11 @@ error_code evaluate_whole_chain(command_head *head);
 error_code release_command_chain(command_head *head) {
     if (head == NULL)
         return NO_ERROR;
+
     free(head->max_resources);
     if (pthread_mutex_destroy(head->mutex))
         return ERROR_DEV_IS_LAZY;
+    free(head->mutex);
 
     while (head->command) {
         command *cmd = head->command;
@@ -381,34 +399,38 @@ error_code create_call(char **line_ptr, command* cmd, int depth) {
             *line_ptr = num_end + 1;
             if (HAS_ERROR(res = create_call(line_ptr, cmd, depth + 1)))
                 return res;
-            cmd->op = BIDON;
         }
     }
 
     char *op = advance_to_operator(*line_ptr);
-    if (op == *line_ptr)
-        return ERROR_SYNTAX;
 
-    // On compte les parties.
-    int parts = 1;
-    for (char *line = *line_ptr; line < op; parts++) {
-        char *part_end = advance_to_whitespace(line);
-        line = advance_to_non_whitespace(part_end);
-    }
+    if (cmd->call == NULL) {
+        if (op == *line_ptr)
+            return ERROR_SYNTAX;
 
-    // On crée la structure pour le call.
-    cmd->call_size = parts;
-    if ((cmd->call = (char**)malloc(sizeof(char*) * parts)) == NULL)
-        return ERROR_OOM;
-    for (int part = 0; part < parts; part++)
-        cmd->call[part] = NULL;
+        // On compte les parties.
+        int parts = 0;
+        for (char *line = *line_ptr; line < op; parts++) {
+            char *part_end = advance_to_whitespace(line);
+            line = advance_to_non_whitespace(part_end);
+        }
 
-    // On remplit la structure.
-    for (int part = 0; part < parts; part++) {
-        char *part_end = advance_to_whitespace(*line_ptr);
-        if ((cmd->call[part] = copy_str(*line_ptr, part_end)) == NULL)
+        // On crée la structure pour le call.
+        // On inclut un élément additionnel car la structure de call nécessite un
+        // élément null à la fin pour appeler exec.
+        cmd->call_size = parts;
+        if ((cmd->call = malloc(sizeof(char*) * (parts + 1))) == NULL)
             return ERROR_OOM;
-        (*line_ptr) = advance_to_non_whitespace(part_end);
+        for (int part = 0; part < parts + 1; part++)
+            cmd->call[part] = NULL;
+
+        // On remplit la structure.
+        for (int part = 0; part < parts; part++) {
+            char *part_end = advance_to_whitespace(*line_ptr);
+            if ((cmd->call[part] = copy_str(*line_ptr, part_end)) == NULL)
+                return ERROR_OOM;
+            (*line_ptr) = advance_to_non_whitespace(part_end);
+        }
     }
 
     // On parse l'opérateur
@@ -454,20 +476,31 @@ error_code create_call(char **line_ptr, command* cmd, int depth) {
  * @param result le résultat de la chaîne de commande
  * @return un code d'erreur
  */
-error_code create_command_chain(const char *line, command_head **result) {
+error_code create_command_chain(char *line, command_head **result) {
+    if (line == NULL)
+        return ERROR_ARG_IS_NULL;
+    if (conf == NULL)
+        return ERROR_CONF_IS_NULL;
     // Alloc head
     command_head *head = NULL;
     command *previous = NULL;
-    if ((head = (command_head*)malloc(sizeof(command_head))) == NULL)
+    if ((head = malloc(sizeof(command_head))) == NULL)
         return ERROR_OOM;
     head->max_resources = NULL;
-    head->max_resources_count = conf->ressources_count; // TODO unsigned?
+    head->max_resources_count = (int)conf->ressources_count; // TODO unsigned?
     head->command = NULL;
     head->mutex = NULL;
     head->background = false; // TODO WATT
 
     error_code res = NO_ERROR;
-    if ((head->max_resources = (int*)malloc(sizeof(int) * head->max_resources_count)) == NULL ||
+    if ((head->max_resources = malloc(sizeof(int) * head->max_resources_count)) == NULL) {
+        res = ERROR_OOM;
+        goto end;
+    }
+    for (int i = 0; i < head->max_resources_count; i++)
+        head->max_resources[i] = 0;
+
+    if ((head->mutex = malloc(sizeof(pthread_mutex_t))) == NULL ||
         pthread_mutex_init(head->mutex, NULL)
     ) {
         res = ERROR_OOM;
@@ -480,7 +513,7 @@ error_code create_command_chain(const char *line, command_head **result) {
             break;
 
         command *cmd = NULL;
-        if ((cmd = (command*)malloc(sizeof(command))) == NULL) {
+        if ((cmd = malloc(sizeof(command))) == NULL) {
            res = ERROR_OOM;
             goto end;
         }
@@ -498,13 +531,18 @@ error_code create_command_chain(const char *line, command_head **result) {
         cmd->op = NONE;
         cmd->next = NULL;
 
-        if ((cmd->ressources = (int*)malloc(sizeof(int) * head->max_resources_count)) == NULL) {
+        if ((cmd->ressources = malloc(sizeof(int) * head->max_resources_count)) == NULL) {
             res = ERROR_OOM;
             goto end;
         }
 
         if (HAS_ERROR(res = create_call(&line, cmd, 0)))
             goto end;
+
+        if (cmd->op == ALSO) {
+            head->background = true;
+            break;
+        }
     }
 
     end:
@@ -541,7 +579,48 @@ error_code count_ressources(command_head *head, command *command_block) {
  * @return un code d'erreur
  */
 error_code evaluate_whole_chain(command_head *head) {
-    return NO_ERROR;
+    if (head == NULL)
+        return ERROR_ARG_IS_NULL;
+    error_code res = NO_ERROR;
+    // Évaluer les ressources maximales.
+    for (command *cmd = head->command; cmd != NULL; cmd = cmd->next)
+        if (HAS_ERROR(res = count_ressources(head, cmd)))
+            return res;
+    // Valider que la chaîne peut être complétée.
+    for (int i = 0; i < head->max_resources_count; i++)
+        if (head->max_resources[i] > resource_count(i))
+            return ERROR_DEV_IS_LAZY;
+    return res;
+}
+
+error_code exec_call(char **call) {
+    if (!call[0])
+        return 0;
+    if (!strcmp("exit", call[0]))
+        return RESULT_EXIT;
+    if (!strcmp("true", call[0]))
+        return 0;
+    if (!strcmp("false", call[0]))
+        return 1;
+
+    int child_status = 0;
+    pid_t pid = fork();
+    if (HAS_ERROR(pid))
+        return ERROR_DEV_IS_LAZY;
+    else if (pid) {
+        // Parent.
+        if (HAS_ERROR(waitpid(pid, &child_status, 0)))
+            return ERROR_DEV_IS_LAZY;
+        return WIFEXITED(child_status) ?
+            WEXITSTATUS(child_status) :
+            ERROR_DEV_IS_LAZY;
+    }
+    else {
+        // Child.
+        execvp(call[0], call);
+        fprintf(stderr, "%s\n", strerror(errno));
+        return RESULT_INVALID_COMMAND;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -554,7 +633,7 @@ static pthread_mutex_t *available_mutex = NULL;
 // Do not access directly!
 // TODO use mutexes when changing or reading _available!
 int *_available = NULL;
-
+bool should_exit = false;
 
 /**
  * Cette fonction enregistre une chaîne de commande pour être exécutée
@@ -564,7 +643,44 @@ int *_available = NULL;
  * @return le pointeur vers le compte client retourné
  */
 banker_customer *register_command(command_head *head) {
-    return NULL;
+    if (head == NULL)
+        return NULL;
+
+    banker_customer *tail = first;
+    banker_customer *customer = NULL;
+
+    pthread_mutex_lock(register_mutex);
+
+    if (tail != NULL) while (true) {
+        if (tail->head == head)
+            goto end;
+        if (tail->next ==  NULL)
+            break;
+        tail = tail->next;
+    }
+
+    if ((customer = malloc(sizeof(banker_customer))) == NULL ||
+        (customer->current_resources = malloc(sizeof(int) * head->max_resources_count)) == NULL
+    ) {
+        free(customer);
+        goto end;
+    }
+
+    if (first == NULL)
+        first = customer;
+    if (tail != NULL)
+        tail->next = customer;
+
+    customer->head = head;
+    customer->next = NULL;
+    customer->prev = tail;
+    for (int i = 0; i < head->max_resources_count; i++)
+        customer->current_resources[i] = 0;
+    customer->depth = -1;
+
+    end:
+    pthread_mutex_unlock(register_mutex);
+    return customer;
 }
 
 /**
@@ -575,6 +691,22 @@ banker_customer *register_command(command_head *head) {
  * @return un code d'erreur
  */
 error_code unregister_command(banker_customer *customer) {
+    if (customer == NULL)
+        return NO_ERROR;
+
+    pthread_mutex_lock(register_mutex);
+
+    if (customer->prev != NULL)
+        customer->prev->next = customer->next;
+    if (customer->next != NULL)
+        customer->next->prev = customer->prev;
+    if (first == customer)
+        first = customer->next != NULL ? customer->next : customer->prev;
+    free(customer->current_resources);
+    free(customer);
+
+    pthread_mutex_unlock(register_mutex);
+
     return NO_ERROR;
 }
 
@@ -586,18 +718,27 @@ error_code unregister_command(banker_customer *customer) {
  * @return
  */
 int bankers(int *work, int *finish) {
-    return 0;
+    return true; // TODO
 }
 
 /**
  * Prépare l'algo. du banquier.
  *
- * Doit utiliser des mutex pour se synchroniser. Doit allour des structures en mémoire. Doit finalement faire "comme si"
+ * Doit utiliser des mutex pour se synchroniser. Doit allouer des structures en mémoire. Doit finalement faire "comme si"
  * la requête avait passé, pour défaire l'allocation au besoin...
  *
  * @param customer
  */
 void call_bankers(banker_customer *customer) {
+    pthread_mutex_lock(available_mutex);
+
+    // TODO
+    if (bankers(NULL, NULL)) {
+        customer->depth = -1;
+        pthread_mutex_unlock(customer->head->mutex);
+    }
+
+    pthread_mutex_unlock(available_mutex);
 }
 
 /**
@@ -607,6 +748,15 @@ void call_bankers(banker_customer *customer) {
  * @return
  */
 void *banker_thread_run() {
+    while (!should_exit) {
+        pthread_mutex_lock(register_mutex);
+
+        for (banker_customer *customer = first; customer != NULL; customer = customer->next)
+            if (customer->depth != -1)
+                call_bankers(customer);
+
+        pthread_mutex_unlock(register_mutex);
+    }
     return NULL;
 }
 
@@ -623,7 +773,61 @@ void *banker_thread_run() {
  * @return un code d'erreur
  */
 error_code request_resource(banker_customer *customer, int cmd_depth) {
+    // On se self-lock pour attendre que le banquier nous donne le go.
+    if (HAS_ERROR(pthread_mutex_lock(customer->head->mutex)))
+        return ERROR_DEV_IS_LAZY;
+    customer->depth = cmd_depth;
+    // Si on avait déjà réussi le premier lock, on dévérouille pour éviter de
+    // laisser le mutex vérouillé dans le vide.
+    if (HAS_ERROR(pthread_mutex_lock(customer->head->mutex))) {
+        customer->depth = -1;
+        pthread_mutex_unlock(customer->head->mutex);
+        return ERROR_DEV_IS_LAZY;
+    }
+
+    pthread_mutex_unlock(customer->head->mutex);
+
     return NO_ERROR;
+}
+
+void *exec_command_chain(void *arg) {
+    error_code res = NO_ERROR;
+    command_head *head = arg;
+    banker_customer *customer = NULL;
+
+    // S'enregistrer auprès des banquiers.
+    if (head == NULL ||
+        (customer = register_command(head)) == NULL
+    ) {
+        res = ERROR_DEV_IS_LAZY;
+        goto end;
+    }
+
+    command *cmd = head->command;
+    int depth = 0;
+    // Passer aux travers des commandes pour les exécuter.
+    for (; cmd != NULL; cmd = cmd->next, depth++) {
+        if (HAS_ERROR(res = request_resource(customer, depth)))
+            goto end;
+        res = 0;
+        for (int i = 0; i < cmd->count; i++)
+            if (HAS_ERROR(res = exec_call(cmd->call)))
+                goto end;
+        if ((cmd->op == OR && !res) ||
+            (cmd->op == AND && res))
+            break;
+    }
+
+    end:
+    unregister_command(customer);
+    release_command_chain(head);
+
+    error_code *res_ptr = malloc(sizeof(error_code));
+    if (res_ptr == NULL) {
+        return NULL;
+    }
+    (*res_ptr) = res;
+    return res_ptr;
 }
 
 /**
@@ -634,7 +838,10 @@ error_code request_resource(banker_customer *customer, int cmd_depth) {
 error_code init_shell() {
     error_code err = NO_ERROR;
 
-    if ((conf = (configuration*)malloc(sizeof(configuration))) == NULL) {
+    if ((conf = malloc(sizeof(configuration))) == NULL ||
+        (register_mutex = malloc(sizeof(pthread_mutex_t))) == NULL ||
+        (available_mutex = malloc(sizeof(pthread_mutex_t))) == NULL
+    ) {
         err = ERROR_OOM;
         goto end;
     }
@@ -650,8 +857,9 @@ error_code init_shell() {
     conf->no_banquers = 0;
 
     end:
-    if (HAS_ERROR(err))
+    if (HAS_ERROR(err)) {
         free(conf);
+    }
     return err;
 }
 
@@ -662,6 +870,8 @@ error_code init_shell() {
  */
 void close_shell() {
     if (conf != NULL) {
+        free(available_mutex);
+        free(register_mutex);
         free(conf->commands);
         free(conf->command_caps);
         free(conf);
@@ -674,7 +884,72 @@ void close_shell() {
  * de votre shell. Vous devez aussi y créer le thread banquier
  */
 void run_shell() {
+    error_code res = NO_ERROR;
 
+    pthread_t *banker_thread = NULL;
+    bool banker_thread_running = false;
+
+    char *line = NULL;
+    size_t line_buffer_size = 0;
+    command_head *line_cmd = NULL;
+
+    // Obtenir la première ligne de configuration.
+    while (true) {
+        if (IS_FATAL(res))
+            goto end;
+        if (HAS_ERROR(res = getline(&line, &line_buffer_size, stdin)) ||
+            HAS_ERROR(res = parse_first_line(line))
+        ) {
+            // TODO display error;
+            printf("Not valid\n");
+            continue;
+        }
+        break;
+    }
+
+    // Créer le thread du banquier.
+    if ((banker_thread = malloc(sizeof(pthread_t))) == NULL ||
+        HAS_ERROR(pthread_create(banker_thread, NULL, &banker_thread_run, NULL)))
+        goto end;
+    banker_thread_running = true;
+
+    // REPL
+    while (!IS_FATAL(res)) {
+        if (HAS_ERROR(res = getline(&line, &line_buffer_size, stdin)) ||
+            HAS_ERROR(res = create_command_chain(line, &line_cmd)) ||
+            HAS_ERROR(res = evaluate_whole_chain(line_cmd))
+        ) {
+            // TODO display error;
+            printf("Oh noes\n");
+            continue;
+        }
+
+        if (line_cmd->background) {
+            pthread_t thread;
+            pthread_create(&thread, NULL, &exec_command_chain, line_cmd);
+        }
+        else {
+            error_code *res_ptr = NULL;
+            if ((res_ptr = exec_command_chain(line_cmd)) == NULL) {
+                res = ERROR_DEV_IS_LAZY;
+                goto end;
+            }
+            res = *res_ptr;
+            free(res_ptr);
+        }
+    }
+
+    end:
+
+    if (banker_thread_running) {
+        should_exit = true;
+        pthread_join(*banker_thread, NULL);
+    }
+    free(banker_thread);
+
+    free(line);
+    if (res == RESULT_INVALID_COMMAND)
+        exit(1);
 }
 
 /**
