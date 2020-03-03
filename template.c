@@ -70,6 +70,12 @@ typedef int error_code;
 #define true (1)
 #define false (0)
 
+#define MEMSET(arr, start, end, value) \
+    do { \
+        for (int i = (start); i < (end); i++) \
+            (arr)[i] = (value); \
+    } while(0) \
+
 typedef struct {
     char **commands;
     int *command_caps;
@@ -171,6 +177,7 @@ char *copy_str(char *line, char *end) {
  * @return un code d'erreur (ou rien si correct)
  */
 error_code parse_first_line(char *line) {
+    // TODO doit gérer une conf déjà initialisée?
     if (conf == NULL)
         return ERROR_CONF_IS_NULL;
     // Le format est
@@ -211,7 +218,7 @@ error_code parse_first_line(char *line) {
             return ERROR_SYNTAX;
     }
 
-    // Création des commandes
+    // Création des commandes.
     end = line;
     conf->command_count = cmds;
     if ((conf->commands = malloc(sizeof(char*) * cmds)) == NULL ||
@@ -228,7 +235,7 @@ error_code parse_first_line(char *line) {
         conf->commands[i] = copy_str(start, end);
     }
 
-    // Calcul des caps
+    // Calcul des caps.
     conf->ressources_count = 4 + conf->command_count;
     for (int i = 0; i < cmds; i++, end++) {
         long parsed_num = strtol(end, &end, 10);
@@ -497,8 +504,7 @@ error_code create_command_chain(char *line, command_head **result) {
         res = ERROR_OOM;
         goto end;
     }
-    for (int i = 0; i < head->max_resources_count; i++)
-        head->max_resources[i] = 0;
+    MEMSET(head->max_resources, 0, head->max_resources_count, 0);
 
     if ((head->mutex = malloc(sizeof(pthread_mutex_t))) == NULL ||
         pthread_mutex_init(head->mutex, NULL)
@@ -511,6 +517,10 @@ error_code create_command_chain(char *line, command_head **result) {
     while (true) {
         if (*(line = advance_to_non_whitespace(line)) == '\0')
             break;
+        if (head->background) { // On ne supporte & qu'en fin de ligne.
+            res = ERROR_SYNTAX;
+            goto end;
+        }
 
         command *cmd = NULL;
         if ((cmd = malloc(sizeof(command))) == NULL) {
@@ -535,6 +545,7 @@ error_code create_command_chain(char *line, command_head **result) {
             res = ERROR_OOM;
             goto end;
         }
+        MEMSET(cmd->ressources, 0, head->max_resources_count, 0);
 
         if (HAS_ERROR(res = create_call(&line, cmd, 0)))
             goto end;
@@ -611,8 +622,8 @@ error_code exec_call(char **call) {
         // Parent.
         if (HAS_ERROR(waitpid(pid, &child_status, 0)))
             return ERROR_DEV_IS_LAZY;
-        return WIFEXITED(child_status) ?
-            WEXITSTATUS(child_status) :
+        return WIFEXITED(child_status) ? // NOLINT(hicpp-signed-bitwise)
+            WEXITSTATUS(child_status) : // NOLINT(hicpp-signed-bitwise)
             ERROR_DEV_IS_LAZY;
     }
     else {
@@ -674,8 +685,7 @@ banker_customer *register_command(command_head *head) {
     customer->head = head;
     customer->next = NULL;
     customer->prev = tail;
-    for (int i = 0; i < head->max_resources_count; i++)
-        customer->current_resources[i] = 0;
+    MEMSET(customer->current_resources, 0, head->max_resources_count, 0);
     customer->depth = -1;
 
     end:
@@ -696,18 +706,41 @@ error_code unregister_command(banker_customer *customer) {
 
     pthread_mutex_lock(register_mutex);
 
+    // Retirer le client de la chaîne.
     if (customer->prev != NULL)
         customer->prev->next = customer->next;
     if (customer->next != NULL)
         customer->next->prev = customer->prev;
     if (first == customer)
         first = customer->next != NULL ? customer->next : customer->prev;
+
+    // Retourner les ressources du client.
+    pthread_mutex_lock(available_mutex);
+
+    for (int i = 0; i < customer->head->max_resources_count; i++)
+        _available[i] += customer->current_resources[i];
+
+    pthread_mutex_unlock(available_mutex);
+
     free(customer->current_resources);
     free(customer);
 
     pthread_mutex_unlock(register_mutex);
 
     return NO_ERROR;
+}
+
+bool bankers_check_customer(int *work, int *finish_ptr, banker_customer *cust) {
+    for (int i = 0; i < conf->ressources_count; i++) {
+        int needed = cust->head->max_resources[i] - cust->current_resources[i];
+        if (needed > work[i])
+            return false;
+    }
+    (*finish_ptr) = true;
+    for (int i = 0; i < conf->ressources_count; i++) {
+        work[i] += cust->current_resources[i];
+    }
+    return true;
 }
 
 /**
@@ -718,7 +751,33 @@ error_code unregister_command(banker_customer *customer) {
  * @return
  */
 int bankers(int *work, int *finish) {
-    return true; // TODO
+    bool any_finished = true;
+    while (any_finished) {
+        any_finished = false;
+
+        banker_customer *cust = first;
+        int *fin_ptr = finish;
+        for (; cust != NULL && (*fin_ptr) != -1; cust = cust->next, fin_ptr++) {
+            if (*fin_ptr)
+                continue;
+            if (bankers_check_customer(work, fin_ptr, cust))
+                any_finished = true;
+        }
+    }
+
+    for (int *fin_ptr = finish; (*fin_ptr) != -1; fin_ptr++)
+        if (!*(fin_ptr))
+            return false;
+
+    return true;
+}
+
+void alloc_cmd_resources(banker_customer *customer, command *cmd, bool inverse) {
+    int sign = inverse ? -1 : 1;
+    for (int i = 0; i < conf->ressources_count; i++) {
+        _available[i] -= sign * cmd->ressources[i];
+        customer->current_resources[i] += sign * cmd->ressources[i];
+    }
 }
 
 /**
@@ -732,11 +791,45 @@ int bankers(int *work, int *finish) {
 void call_bankers(banker_customer *customer) {
     pthread_mutex_lock(available_mutex);
 
-    // TODO
-    if (bankers(NULL, NULL)) {
-        customer->depth = -1;
-        pthread_mutex_unlock(customer->head->mutex);
+    int *work = NULL,
+        *finish = NULL;
+    int proc_count = 0;
+
+    // Trouver la commande notée par depth.
+    command *cmd = customer->head->command;
+    for (int depth = 0;
+        cmd != NULL && depth < customer->depth;
+        cmd = cmd->next, depth++);
+    if (cmd == NULL)
+        goto end;
+
+    // Initialiser work/finish.
+    for (banker_customer *c = first; c != NULL; c = c->next, proc_count++);
+
+    if ((work = malloc(sizeof(int) * conf->ressources_count)) == NULL ||
+        (finish = malloc(sizeof(int) * (proc_count + 1))) == NULL)
+        goto end;
+
+    // Comptabiliser les ressources disponibles.
+    alloc_cmd_resources(customer, cmd, false);
+    memcpy(work, _available, sizeof(int) * conf->ressources_count);
+
+    // Initialiser les processus qui peuvent finir.
+    MEMSET(finish, 0, proc_count, false);
+    finish[proc_count] = -1;
+
+    if (!bankers(work, finish)) {
+        alloc_cmd_resources(customer, cmd, true);
+        goto end;
     }
+
+    // Le client peut procéder.
+    customer->depth = -1;
+    pthread_mutex_unlock(customer->head->mutex);
+
+    end:
+    free(work);
+    free(finish);
 
     pthread_mutex_unlock(available_mutex);
 }
@@ -748,6 +841,11 @@ void call_bankers(banker_customer *customer) {
  * @return
  */
 void *banker_thread_run() {
+    // Création du tableau des ressources disponibles.
+    if ((_available = malloc(sizeof(int) * conf->ressources_count)) == NULL)
+        return NULL;
+    MEMSET(_available, 0, conf->ressources_count, resource_count(i));
+
     while (!should_exit) {
         pthread_mutex_lock(register_mutex);
 
@@ -757,6 +855,9 @@ void *banker_thread_run() {
 
         pthread_mutex_unlock(register_mutex);
     }
+
+    free(_available);
+
     return NULL;
 }
 
@@ -773,12 +874,12 @@ void *banker_thread_run() {
  * @return un code d'erreur
  */
 error_code request_resource(banker_customer *customer, int cmd_depth) {
-    // On se self-lock pour attendre que le banquier nous donne le go.
     if (HAS_ERROR(pthread_mutex_lock(customer->head->mutex)))
         return ERROR_DEV_IS_LAZY;
     customer->depth = cmd_depth;
     // Si on avait déjà réussi le premier lock, on dévérouille pour éviter de
     // laisser le mutex vérouillé dans le vide.
+    // On se self-lock pour attendre que le banquier nous donne le go.
     if (HAS_ERROR(pthread_mutex_lock(customer->head->mutex))) {
         customer->depth = -1;
         pthread_mutex_unlock(customer->head->mutex);
@@ -872,6 +973,7 @@ void close_shell() {
     if (conf != NULL) {
         free(available_mutex);
         free(register_mutex);
+        free(_available);
         free(conf->commands);
         free(conf->command_caps);
         free(conf);
