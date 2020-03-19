@@ -1,0 +1,6 @@
+echo&2&0&0&0&10
+echo first && echo thirst &
+echo second && echo bond &
+wait
+echo doune
+exit

@@ -1,0 +1,5 @@
+echo&5&4&3&2&1
+uname&
+whoami&
+echo second &&
+exit
