@@ -1,8 +1,9 @@
 echo,sed&5,27&12&11&14&2
 echo yes && echo yes_again || echo no
 false || true && echo yeppers
-sleep 0.07 && echo doune &
-sleep 0.15&&echo again&
+protato
+sleep 0.05 && echo doune &
+sleep 0.10 &&echo again&
 echo wait_for_it
 wait
 exit

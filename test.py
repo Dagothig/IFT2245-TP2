@@ -5,6 +5,7 @@ from subprocess import check_output, run, STDOUT, CalledProcessError, TimeoutExp
 from re import search
 from multiprocessing import Pool
 import os
+import sys
 
 res = run("make")
 if res.returncode != 0:
@@ -23,9 +24,9 @@ def exp_concurrent(out, strs):
             strs.remove(str)
             return exp_concurrent(found, strs)
 
-def exec_test(test_file):
+def exec_test(test_file, num):
     test_name = test_file[6:-5]
-    test_error_file = "tests/%s.error" % test_name
+    test_error_file = "tests/%s-%i.error" % (test_name, num)
     try:
         # Running test
         out = check_output(
@@ -53,8 +54,6 @@ def exec_test(test_file):
                 break
         if to_check == None:
             print("Test %s not ok, got:\n%sWhen expecting:\n%s" % (test_name, out, expects))
-        else:
-            print("Test %s ok" % test_name)
     except CalledProcessError as e:
         print("Test %s not ok" % test_name)
         with open(test_error_file, 'r') as file:
@@ -66,7 +65,11 @@ def exec_test(test_file):
         print_exc()
 
 test_files = glob('tests/*.test')
-pool = Pool(os.cpu_count() * 2)
-pool.map(exec_test, test_files)
+print("Checking...\n%s" % '\n'.join(test_files))
+pool = Pool(os.cpu_count())
+pool.starmap(exec_test,
+    [(f, i)
+        for i in range(int(sys.argv[1]) if len(sys.argv) > 1 else 1)
+        for f in test_files])
 
 print("Tests done")

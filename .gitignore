@@ -5,3 +5,4 @@ Makefile
 *.cmake
 .idea/
 *.cbp
+tests/*.error

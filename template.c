@@ -664,7 +664,7 @@ error_code exec_call(command_head *head, char **call) {
     else {
         // Child.
         execvp(call[0], call);
-        fprintf(stderr, "no such file or directory\n");
+        fprintf(stderr, "command not found\n");
         exit(0);
     }
 }
