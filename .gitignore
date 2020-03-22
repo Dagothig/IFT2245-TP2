@@ -6,3 +6,4 @@ Makefile
 .idea/
 *.cbp
 tests/*.error
+*.fuse_*

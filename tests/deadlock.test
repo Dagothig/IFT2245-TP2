@@ -1,6 +1,6 @@
 echo&2&0&0&0&10
-echo first && echo thirst &
-echo second && echo bond &
+echo first && sleep 0.1 && echo thirst &
+echo second && sleep 0.1 && echo bond &
 wait
 echo doune
 exit

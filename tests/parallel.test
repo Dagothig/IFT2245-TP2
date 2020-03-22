@@ -1,5 +1,27 @@
-echo&5&4&3&2&1
-uname&
-whoami&
-echo second &&
+sleep,echo&4,4&1&1&1&1
+
+echo takin locks
+whereis -b ls && ping banana || uname && sleep 0.3 && echo release fs && f1(whereis) && sleep 0.8 && echo release net && f1(ping) && sleep 0.8 && echo release sys && f1(uname) && sleep 0.3 && echo done &
+sleep 0.3
+
+ls tests/parallel-dir &
+cat tests/parallel.text &
+find -name parallel-sub.txt &
+grep s tests/parallel.text &
+tail tests/parallel.text -n 1 &
+head tests/parallel.text -n 1 &
+whereis -b ls &
+rm -rf /tmp/banana && f1(rm) && mkdir /tmp/banana && f1(mkdir) && touch /tmp/banana/touchy && f1(touch) && rm -rvf /tmp/banana &
+
+netstat -r &
+wget -nv localhost &
+curl &
+dnsmasq &
+route -C &
+ping banana &
+
+whoami &
+uname &
+
+wait
 exit

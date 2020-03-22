@@ -1,0 +1,54 @@
+[expect]
+takin locks
+ls: /bin/ls
+ping: banana: Temporary failure in name resolution
+Linux
+[expect]
+release fs
+[concurrent]
+parallel-sub.txt
+[and]
+text
+search
+end
+[and]
+./tests/parallel-dir/parallel-sub.txt
+[and]
+text
+[and]
+search
+[and]
+end
+[and]
+removed '/tmp/banana/touchy'
+removed directory '/tmp/banana'
+[and]
+ls: /bin/ls
+[expect]
+release net
+[concurrent]
+Kernel IP routing table
+Destination     Gateway         Genmask         Flags   MSS Window  irtt Iface
+default         SR400ac.lan     0.0.0.0         UG        0 0          0 wlp1s0
+link-local      0.0.0.0         255.255.0.0     U         0 0          0 wlp1s0
+192.168.1.0     0.0.0.0         255.255.255.0   U         0 0          0 wlp1s0
+[and]
+failed: Connection refused.
+[and]
+curl: try 'curl --help' or 'curl --manual' for more information
+[and]
+
+dnsmasq: failed to create listening socket for port 53: Permission denied
+[and]
+Kernel IP routing cache
+Source          Destination     Gateway         Flags Metric Ref    Use Iface
+[and]
+ping: banana: Temporary failure in name resolution
+[expect]
+release sys
+[concurrent]
+dagothig
+[and]
+Linux
+[expect]
+done

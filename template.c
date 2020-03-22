@@ -1,8 +1,6 @@
-
 /**
  * Guillaume Noël-Martel 20056635
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <memory.h>
@@ -64,6 +62,7 @@ typedef int error_code;
 #define ERROR_CONF_IS_NULL (-2)
 #define ERROR_SYNTAX (-3)
 #define ERROR_DEV_IS_LAZY (-4)
+#define ERROR_INSUFFICIENT_RESSOURCES (-5)
 
 #define ERROR_OOM (-10)
 #define RESULT_EXIT (-11)
@@ -83,6 +82,14 @@ void print_arr(char *prefix, int *arr, int count) {
     for (int i = 0; i < count; i++)
         printf(" %i", arr[i]);
     printf("\n");
+}
+
+int imin(int a, int b) {
+    return a < b ? a : b;
+}
+
+int imax(int a, int b) {
+    return a > b ? a : b;
 }
 
 typedef struct {
@@ -183,7 +190,7 @@ char *copy_str(char *line, char *end) {
     char *str;
     long n = end - line;
     if ((str = malloc(sizeof(char) * (n + 1))) == NULL)
-        NULL;
+        return NULL;
     for (long i = 0; i < n; i++)
         str[i] = line[i];
     str[n] = '\0';
@@ -596,10 +603,11 @@ error_code count_ressources(command_head *head, command *command_block) {
         command_block->ressources == NULL ||
         command_block->call_size < 1)
         return ERROR_ARG_IS_NULL;
+    // wait est "spécial" et nécessite que les autres threads finissent pour qu'il puisse compléter.
+    if (!strcmp("wait", command_block->call[0]))
+        return NO_ERROR;
     int no = resource_no(command_block->call[0]);
-    // TODO check res / max res count
     command_block->ressources[no] = command_block->count;
-    head->max_resources[no] += command_block->count;
     return NO_ERROR;
 }
 
@@ -613,18 +621,30 @@ error_code evaluate_whole_chain(command_head *head) {
         return ERROR_ARG_IS_NULL;
 
     error_code res = NO_ERROR;
+    int *resources = NULL;
+    if ((resources = malloc(sizeof(int) * head->max_resources_count)) == NULL) {
+        res = ERROR_OOM;
+        goto end;
+    }
+    MEMSET(resources, 0, head->max_resources_count, 0);
     // Évaluer les ressources maximales.
-    for (command *cmd = head->command; cmd != NULL; cmd = cmd->next)
+    for (command *cmd = head->command; cmd != NULL; cmd = cmd->next) {
         if (HAS_ERROR(res = count_ressources(head, cmd)))
             goto end;
-    // Valider que la chaîne peut être complétée.
-    for (int i = 0; i < head->max_resources_count; i++) {
-        if (head->max_resources[i] > resource_count(i)) {
-            res = ERROR_DEV_IS_LAZY;
-            goto end;
+        for (int i = 0; i < head->max_resources_count; i++) {
+            resources[i] += cmd->ressources[i];
+            int newmax = imax(head->max_resources[i], resources[i]);
+            // Valider que la chaîne peut être complétée.
+            if (resources[i] < 0 || newmax > resource_count(i)) {
+                res = ERROR_INSUFFICIENT_RESSOURCES;
+                goto end;
+            }
+            head->max_resources[i] = newmax;
         }
     }
+
     end:
+    free(resources);
     return res;
 }
 
@@ -803,6 +823,10 @@ bool bankers_check_customer(int *work, int *finish_ptr, banker_customer *cust) {
  * @return
  */
 int bankers(int *work, int *finish) {
+    for (int i = 0; i < conf->ressources_count; i++)
+        if (work[i] < 0)
+            return false;
+
     bool any_finished = true;
     while (any_finished) {
         any_finished = false;
@@ -826,10 +850,13 @@ int bankers(int *work, int *finish) {
 
 void alloc_cmd_resources(banker_customer *customer, command *cmd, bool inverse) {
     int sign = inverse ? -1 : 1;
+    //printf(inverse ? "dealloc %s\n" : "alloc %s\n", cmd->call[0]);
+    //print_arr("", cmd->ressources, conf->ressources_count);
     for (int i = 0; i < conf->ressources_count; i++) {
         _available[i] -= sign * cmd->ressources[i];
         customer->current_resources[i] += sign * cmd->ressources[i];
     }
+    //print_arr("", _available, conf->ressources_count);
 }
 
 /**
@@ -908,6 +935,17 @@ void *banker_thread_run() {
         sleep(0);
     }
 
+    // S'il y a des clients restants, ils doivent être débloqués pour pouvoir procéder
+    // à la fermeture.
+    pthread_mutex_lock(register_mutex);
+
+    for (banker_customer *customer = first; customer != NULL; customer = customer->next) {
+        if (customer->depth != -1)
+            pthread_mutex_unlock(customer->head->mutex);
+    }
+
+    pthread_mutex_unlock(register_mutex);
+
     return NULL;
 }
 
@@ -932,7 +970,7 @@ error_code request_resource(banker_customer *customer, int cmd_depth) {
     // laisser le mutex vérouillé dans le vide.
     // On se self-lock pour attendre que le banquier nous donne le go.
     //printf("    locked customer %i\n", customer->no);
-    if (HAS_ERROR(pthread_mutex_lock(customer->head->mutex))) {
+    if (should_exit || HAS_ERROR(pthread_mutex_lock(customer->head->mutex))) {
         customer->depth = -1;
         pthread_mutex_unlock(customer->head->mutex);
         //printf("    unlocked customer %i\n", customer->no);
@@ -941,6 +979,9 @@ error_code request_resource(banker_customer *customer, int cmd_depth) {
 
     pthread_mutex_unlock(customer->head->mutex);
     //printf("    unlocked customer %i\n", customer->no);
+
+    if (should_exit)
+        return RESULT_EXIT;
 
     return NO_ERROR;
 }

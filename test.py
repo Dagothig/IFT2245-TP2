@@ -7,8 +7,7 @@ from multiprocessing import Pool
 import os
 import sys
 
-res = run("make")
-if res.returncode != 0:
+if run(["cmake", "."]).returncode != 0 or run("make").returncode != 0:
     exit()
 
 def exp(out, str):
@@ -23,6 +22,26 @@ def exp_concurrent(out, strs):
         if found != None:
             strs.remove(str)
             return exp_concurrent(found, strs)
+    print("failed when expecting %s" % strs)
+
+def exp_parallel(out, strs):
+    if len(strs) == 0:
+        return out
+    indices = [0] * len(strs)
+    for i in len(out):
+        car = out[i]
+        for j in len(strs):
+            str = strs[j]
+            str_len = len(str)
+            index = indices[j]
+            if index == str_len:
+                continue
+            str_car = str[index]
+            if car == str_car:
+                break
+        else:
+            continue
+        return out[i:]
 
 def exec_test(test_file, num):
     test_name = test_file[6:-5]
@@ -37,10 +56,11 @@ def exec_test(test_file, num):
                                ./TP2" % (test_file, test_error_file),
             stderr=STDOUT,
             shell=True,
-            timeout=5).decode()
+            timeout=10).decode()
         # Getting expect
         with open('tests/%s.expect' % test_name, 'r') as file:
-            expects = [str.split(']\n') for str in file.read().split('[') if str != '']
+            expects_str = file.read()
+            expects = [str.split(']\n') for str in expects_str.split('[') if str != '']
         # Checking expect
         to_check = out
         for i in range(0, len(expects)):
@@ -53,23 +73,21 @@ def exec_test(test_file, num):
             if to_check == None:
                 break
         if to_check == None:
-            print("Test %s not ok, got:\n%sWhen expecting:\n%s" % (test_name, out, expects))
+            print("\033[0;31mTest %s not ok, got:\033[0m\n%s\033[0;31mWhen expecting:\033[0m\n%s" % (test_name, out, expects_str))
     except CalledProcessError as e:
-        print("Test %s not ok" % test_name)
+        print("\033[0;31mTest %s not ok\033[0m" % test_name)
         with open(test_error_file, 'r') as file:
             print(file.read())
     except TimeoutExpired as e:
-        print("Test %s not ok: took too long" % test_name)
+        print("\033[0;31mTest %s not ok: took too long\033[0m" % test_name)
     except Exception as e:
-        print("Test %s not ok" % test_name)
+        print("\033[0;31mTest %s not ok\033[0m" % test_name)
         print_exc()
 
+repeats = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 test_files = glob('tests/*.test')
-print("Checking...\n%s" % '\n'.join(test_files))
+print("Checking each test %i times ...\n\033[0;33m%s\033[0m" % (repeats, '\n'.join(test_files)))
 pool = Pool(os.cpu_count())
-pool.starmap(exec_test,
-    [(f, i)
-        for i in range(int(sys.argv[1]) if len(sys.argv) > 1 else 1)
-        for f in test_files])
+pool.starmap(exec_test, [(f, i) for i in range(repeats) for f in test_files])
 
 print("Tests done")

@@ -1,0 +1,5 @@
+{
+    "watch": ["template.c", "tests/"],
+    "ext": "c,test,expect",
+    "exec": "python3 test.py 1"
+}
