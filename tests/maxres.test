@@ -1,4 +1,5 @@
 echo&1&0&0&0&1
 echo woop && f1(echo) && echo whap
 r2(echo ye) && f2(echo banana) && echo woo
+echo banana && f2(echo) && r1(echo)
 exit

@@ -1,0 +1,6 @@
+sleep,echo&10,10&2&1&1&2
+sleep 0.2 && r2(cettecommandenexistepas) &
+imprimeenpremier && sleep 0.5 &
+sleep 0.2 && imprimeendeuxieme
+wait
+exit

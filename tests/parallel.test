@@ -1,8 +1,8 @@
 sleep,echo&4,4&1&1&1&1
 
 echo takin locks
-whereis -b ls && ping banana || uname && sleep 0.3 && echo release fs && f1(whereis) && sleep 0.8 && echo release net && f1(ping) && sleep 0.8 && echo release sys && f1(uname) && sleep 0.3 && echo done &
-sleep 0.3
+whereis -b ls && ping banana || uname && sleep 1 && echo release fs && f1(whereis) && sleep 1 && echo release net && f1(ping) && sleep 1 && echo release sys && f1(uname) && sleep 1 && echo done &
+sleep 1
 
 ls tests/parallel-dir &
 cat tests/parallel.text &

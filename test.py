@@ -28,9 +28,9 @@ def exp_parallel(out, strs):
     if len(strs) == 0:
         return out
     indices = [0] * len(strs)
-    for i in len(out):
+    for i in range(len(out)):
         car = out[i]
-        for j in len(strs):
+        for j in range(len(strs)):
             str = strs[j]
             str_len = len(str)
             index = indices[j]
@@ -67,9 +67,10 @@ def exec_test(test_file, num):
             [expect_type, expect_value] = expects[i]
             if expect_type == 'expect':
                 to_check = exp(to_check, expect_value)
-            elif expect_type == 'concurrent':
+            elif expect_type == 'concurrent' or expect_type == 'parallel':
                 tests = takewhile(lambda e: e[0] == 'and', expects[i+1:])
-                to_check = exp_concurrent(to_check, [expect_value] + [test[1] for test in tests])
+                sub_expects = [expect_value] + [test[1] for test in tests]
+                to_check = (exp_concurrent if expect_type == 'concurrent' else exp_parallel)(to_check, sub_expects)
             if to_check == None:
                 break
         if to_check == None:

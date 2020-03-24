@@ -1,0 +1,10 @@
+[expect]
+printsenpremier:
+[concurrent]
+bar
+foo
+[and]
+bar
+foo
+[and]
+printsen2e:
