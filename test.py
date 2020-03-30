@@ -7,6 +7,9 @@ from multiprocessing import Pool
 import os
 import sys
 
+repeats = int(sys.argv[1]) if len(sys.argv) > 1 else 1
+memcheck = sys.argv[2] == '--memcheck' if len(sys.argv) > 2 else False
+
 if run(["cmake", "."]).returncode != 0 or run("make").returncode != 0:
     exit()
 
@@ -22,7 +25,6 @@ def exp_concurrent(out, strs):
         if found != None:
             strs.remove(str)
             return exp_concurrent(found, strs)
-    print("failed when expecting %s" % strs)
 
 def exp_parallel(out, strs):
     if len(strs) == 0:
@@ -53,7 +55,9 @@ def exec_test(test_file, num):
                                --error-exitcode=1 \
                                --leak-check=full \
                                --show-leak-kinds=all \
-                               ./TP2" % (test_file, test_error_file),
+                               ./TP2" % (test_file, test_error_file)
+            if memcheck else
+            "cat %s | ./TP2" % test_file,
             stderr=STDOUT,
             shell=True,
             timeout=10).decode()
@@ -85,7 +89,6 @@ def exec_test(test_file, num):
         print("\033[0;31mTest %s not ok\033[0m" % test_name)
         print_exc()
 
-repeats = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 test_files = glob('tests/*.test')
 print("Checking each test %i times ...\n\033[0;33m%s\033[0m" % (repeats, '\n'.join(test_files)))
 pool = Pool(os.cpu_count())

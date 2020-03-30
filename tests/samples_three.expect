@@ -1,7 +1,5 @@
 [expect]
 bash: imprimeenpremier: command not found
-[concurrent]
 bash: imprimeendeuxieme: command not found
-[and]
 bash: cettecommandenexistepas: command not found
 bash: cettecommandenexistepas: command not found

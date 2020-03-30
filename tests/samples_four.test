@@ -1,5 +1,6 @@
-blocker,echo&2,20&2&1&1&20
-blocker || echo oh_no_il_ma_depassee &
-r2(blocker) || echo muahahha_je_passe_avant_toi && sleep 1 &
-wait
+blocker,echo&2,20&2&1&1&30
+sleep 1 && r2(blocker) || echo last &
+blocker || echo lolimfirst && sleep 2 &
+sleep 1 && blocker || echo 2e!
+sleep 4
 exit

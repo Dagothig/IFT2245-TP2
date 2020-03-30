@@ -1,6 +1,6 @@
-,&,&2&1&1&10
+&&2&1&1&30
 sleep 0.2 && r2(ls tests/samples-dir) &
 whereis printsenpremier && sleep 0.5 &
 sleep 0.2 && whereis printsen2e
-wait
+sleep 2
 exit
